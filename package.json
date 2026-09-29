@@ -1,0 +1,38 @@
+{
+  "name": "starlink-auto",
+  "version": "1.0.0",
+  "description": "Starlink Hotspot & MikroTik automated provisioning and billing engine",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "NODE_OPTIONS='--dns-result-order=ipv4first' node --watch --env-file=.env src/index.js",
+    "start": "NODE_OPTIONS='--dns-result-order=ipv4first' node --env-file=.env src/index.js",
+    "db:seed": "node --env-file=.env db/seed.js",
+    "ft:test": "node --env-file=.env scripts/test-flutter.js",
+    "rev:test": "node --env-file=.env scripts/test-revenue.js",
+    "clean:mikrotik": "node --env-file=.env clean-mikrotik.js"
+  },
+  "keywords": [
+    "starlink",
+    "mikrotik",
+    "hotspot",
+    "automation",
+    "isp"
+  ],
+  "author": "NA.",
+  "license": "ISC",
+  "packageManager": "pnpm@10.17.1",
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc11",
+    "axios": "^1.16.1",
+    "cors": "^2.8.6",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.21.0",
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0",
+    "telegraf": "^4.16.3",
+    "uuid": "^14.0.0",
+    "vibe-gx": "^4.3.0"
+  }
+}
