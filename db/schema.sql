@@ -27,7 +27,7 @@ DO $$ BEGIN
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- Add new session states to existing DBs (safe — IF NOT EXISTS)
+-- Add session states if missing
 DO $$ BEGIN ALTER TYPE session_state ADD VALUE IF NOT EXISTS 'awaiting_service_selection'; EXCEPTION WHEN others THEN NULL; END $$;
 DO $$ BEGIN ALTER TYPE session_state ADD VALUE IF NOT EXISTS 'awaiting_support_message'; EXCEPTION WHEN others THEN NULL; END $$;
 DO $$ BEGIN ALTER TYPE session_state ADD VALUE IF NOT EXISTS 'awaiting_hotspot_username'; EXCEPTION WHEN others THEN NULL; END $$;
@@ -42,6 +42,7 @@ DO $$ BEGIN ALTER TYPE session_state ADD VALUE IF NOT EXISTS 'awaiting_hotspot_p
 DO $$ BEGIN ALTER TYPE session_state ADD VALUE IF NOT EXISTS 'awaiting_new_username_confirm'; EXCEPTION WHEN others THEN NULL; END $$;
 DO $$ BEGIN ALTER TYPE session_state ADD VALUE IF NOT EXISTS 'awaiting_new_password_confirm'; EXCEPTION WHEN others THEN NULL; END $$;
 
+-- Users Table
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     phone VARCHAR(200) UNIQUE,
@@ -53,15 +54,9 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
--- Add hotspot credential columns to existing users table
-ALTER TABLE users ADD COLUMN IF NOT EXISTS hotspot_username VARCHAR(50);
-ALTER TABLE users ADD COLUMN IF NOT EXISTS hotspot_password VARCHAR(100);
-
--- Ensure hotspot_username is unique case-sensitively (Jenny and JeNNy are different users)
-DROP INDEX IF EXISTS idx_users_unique_hotspot_username;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_unique_hotspot_username ON users (hotspot_username) WHERE hotspot_username IS NOT NULL;
 
+-- Plans Table
 CREATE TABLE IF NOT EXISTS plans (
     id SERIAL PRIMARY KEY,
     name VARCHAR(225),
@@ -74,13 +69,7 @@ CREATE TABLE IF NOT EXISTS plans (
     mikrotik_profile VARCHAR(255) -- Full MikroTik hotspot profile name
 );
 
--- Ensure columns exist on plans table
-ALTER TABLE plans ADD COLUMN IF NOT EXISTS duration_str VARCHAR(50);
-ALTER TABLE plans ADD COLUMN IF NOT EXISTS shared_users INTEGER DEFAULT 1;
-ALTER TABLE plans ADD COLUMN IF NOT EXISTS mikrotik_profile VARCHAR(255);
-ALTER TABLE plans ALTER COLUMN mikrotik_profile TYPE VARCHAR(255);
-ALTER TABLE plans ALTER COLUMN duration_days TYPE NUMERIC(8, 2);
-
+-- Payments Table
 CREATE TABLE IF NOT EXISTS payments (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
@@ -93,26 +82,22 @@ CREATE TABLE IF NOT EXISTS payments (
     paid_at TIMESTAMP
 );
 
+-- Subscriptions Table (Hotspot Tickets)
 CREATE TABLE IF NOT EXISTS subscriptions (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
     plan_id INTEGER REFERENCES plans(id),
-    pin VARCHAR(50),                         -- MikroTik Hotspot Ticket / Login PIN
+    pin VARCHAR(50) UNIQUE,                  -- MikroTik Hotspot Ticket / Login PIN
     status subscription_status DEFAULT 'active',
-    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expiry_time TIMESTAMP,
+    start_time TIMESTAMP,                    -- NULL until first login activation
+    expiry_time TIMESTAMP,                   -- NULL until first login activation
     data_used_mb INTEGER DEFAULT 0,
     alert_sent BOOLEAN DEFAULT false,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS pin VARCHAR(50);
-ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS alert_sent BOOLEAN DEFAULT false;
-ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 CREATE INDEX IF NOT EXISTS idx_subscriptions_pin ON subscriptions (pin);
--- Prevent duplicate PINs — idempotency guard (safe to run on existing data after deduplication)
-ALTER TABLE subscriptions ADD CONSTRAINT IF NOT EXISTS subscriptions_pin_unique UNIQUE (pin);
 
--- Session state for conversational flow (WhatsApp & Telegram)
+-- Chat Sessions Table
 CREATE TABLE IF NOT EXISTS chat_sessions (
     phone VARCHAR(200) PRIMARY KEY,
     state session_state DEFAULT 'start',
@@ -120,28 +105,20 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     remote_jid VARCHAR(100),              -- WhatsApp JID
     telegram_chat_id VARCHAR(100),        -- Telegram Chat ID
     preferred_platform VARCHAR(20) DEFAULT 'whatsapp', -- 'whatsapp' | 'telegram'
+    gift_target_user_id INT REFERENCES users(id),
+    pending_username VARCHAR(50),
+    pending_password VARCHAR(10),
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Add new columns to existing sessions table (handled in migration below, but kept for schema consistency)
-ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS remote_jid VARCHAR(100);
-ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS telegram_chat_id VARCHAR(100);
-ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS preferred_platform VARCHAR(20) DEFAULT 'whatsapp';
--- Add gift target user reference (NULL when buying for self)
-ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS gift_target_user_id INT REFERENCES users(id);
--- Temp staging columns for username/password confirmation flow
-ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS pending_username VARCHAR(50);
-ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS pending_password VARCHAR(10);
-
--- MikroTik provisioning retry queue
+-- Provisioning Queue Table
 CREATE TABLE IF NOT EXISTS provisioning_queue (
     id               SERIAL PRIMARY KEY,
     user_id          INTEGER REFERENCES users(id),
-    phone            VARCHAR(200) NOT NULL,       -- MikroTik username and Phone for messaging
-
+    phone            VARCHAR(200) NOT NULL,
     mikrotik_profile VARCHAR(100) NOT NULL,
     plan_name        VARCHAR(225),
-    pin              VARCHAR(10) NOT NULL,        -- Pre-generated PIN (consistent across retries)
+    pin              VARCHAR(10) NOT NULL,        -- Pre-generated PIN
     attempts         INTEGER DEFAULT 0,
     max_attempts     INTEGER DEFAULT 10,
     status           VARCHAR(20) DEFAULT 'pending', -- pending | completed | abandoned
@@ -151,41 +128,14 @@ CREATE TABLE IF NOT EXISTS provisioning_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_prov_queue_pending ON provisioning_queue (status, next_retry_at);
 
--- =============================================================================
--- MIGRATION SCRIPT
--- Run these statements manually if you already have an existing database.
--- =============================================================================
--- Step 1: Drop old Paystack/static-account columns from users
--- ALTER TABLE users DROP COLUMN IF EXISTS paystack_customer_code;
--- ALTER TABLE users DROP COLUMN IF EXISTS virtual_account_reference;
--- ALTER TABLE users DROP COLUMN IF EXISTS virtual_account_number;
--- ALTER TABLE users DROP COLUMN IF EXISTS virtual_account_bank;
--- ALTER TABLE users ADD COLUMN IF NOT EXISTS flutterwave_customer_id VARCHAR(100);
-
--- Step 2: Add dynamic VA reference to payments
--- ALTER TABLE payments ADD COLUMN IF NOT EXISTS virtual_account_reference VARCHAR(100) UNIQUE;
-
--- Step 3: Drop old session columns
--- ALTER TABLE whatsapp_sessions DROP COLUMN IF EXISTS temp_name;
-
--- Step 4: Remove unused session_state values (Postgres doesn't support DROP VALUE on ENUMs,
---         so if you previously ran the static migration, you can leave those values in place —
---         they'll simply go unused. Or recreate the type from scratch on a clean DB.)
-
--- Step 5: Telegram Integration & Message Queue (Run this to migrate to the new dual-engine system)
-ALTER TABLE IF EXISTS whatsapp_sessions RENAME TO chat_sessions;
-ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS telegram_chat_id VARCHAR(100);
-ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS preferred_platform VARCHAR(20) DEFAULT 'whatsapp';
-ALTER TABLE provisioning_queue DROP COLUMN IF EXISTS remote_jid;
-
--- Offline Message Queue
+-- Offline Message Queue Table
 CREATE TABLE IF NOT EXISTS message_queue (
     id SERIAL PRIMARY KEY,
     phone VARCHAR(200) NOT NULL,
     message_text TEXT NOT NULL,
     send_to_both BOOLEAN DEFAULT false,
     attempts INTEGER DEFAULT 0,
-    status VARCHAR(20) DEFAULT 'pending', -- pending | failed
+    status VARCHAR(20) DEFAULT 'pending', -- pending | failed | sent
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_attempted_at TIMESTAMP
 );
