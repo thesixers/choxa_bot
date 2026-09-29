@@ -12,7 +12,7 @@ async function syncPayments() {
   console.log("🔍 Scanning database for pending payments...");
 
   try {
-    // Find all pending payments
+    // Find all pending payments with virtual account references
     const res = await db.query(`
       SELECT p.id AS payment_id, p.virtual_account_reference AS tx_ref, 
              p.amount AS amount_paid, p.user_id, p.created_at, u.phone 
@@ -20,6 +20,7 @@ async function syncPayments() {
       JOIN users u ON u.id = p.user_id
       WHERE p.status = 'pending' 
         AND p.virtual_account_reference IS NOT NULL
+      ORDER BY p.created_at DESC
     `);
 
     if (res.rowCount === 0) {
@@ -32,6 +33,7 @@ async function syncPayments() {
     let confirmedCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
+    const botPort = process.env.PORT || 3004;
 
     for (const payment of res.rows) {
       const { payment_id, tx_ref, amount_paid, user_id, phone } = payment;
@@ -39,26 +41,51 @@ async function syncPayments() {
       console.log(`🔄 Checking TX_REF: ${tx_ref} (User: ${phone})`);
 
       try {
-        // 1. Verify with Flutterwave API
-        const flwRes = await fetch(`https://api.flutterwave.com/v3/transactions?tx_ref=${tx_ref}`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        const flwData = await flwRes.json();
-
-        // 2. Check if the payment was successful on Flutterwave
         let isSuccessful = false;
-        
-        if (flwData.status === "success" && flwData.data && flwData.data.length > 0) {
-            // Find any successful transaction matching this tx_ref
+        let confirmedAmount = Number(amount_paid);
+
+        // 1. Verify with Flutterwave API (verify-by-reference first)
+        try {
+          const verifyRes = await fetch(
+            `https://api.flutterwave.com/v3/transactions/verify-by-reference?tx_ref=${encodeURIComponent(tx_ref)}`,
+            {
+              method: "GET",
+              headers: {
+                Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
+                "Content-Type": "application/json",
+              },
+            }
+          );
+          const verifyData = await verifyRes.json();
+          if (verifyData.status === "success" && verifyData.data?.status === "successful") {
+            isSuccessful = true;
+            confirmedAmount = Number(verifyData.data.amount || amount_paid);
+          }
+        } catch (vErr) {
+          console.warn(`   ⚠️ verify-by-reference check returned:`, vErr.message);
+        }
+
+        // Fallback: Check /transactions list by tx_ref if verify-by-reference didn't confirm
+        if (!isSuccessful) {
+          const flwRes = await fetch(
+            `https://api.flutterwave.com/v3/transactions?tx_ref=${encodeURIComponent(tx_ref)}`,
+            {
+              method: "GET",
+              headers: {
+                Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
+                "Content-Type": "application/json",
+              },
+            }
+          );
+          const flwData = await flwRes.json();
+
+          if (flwData.status === "success" && Array.isArray(flwData.data) && flwData.data.length > 0) {
             const successfulTx = flwData.data.find(tx => tx.status === "successful");
             if (successfulTx) {
-                isSuccessful = true;
+              isSuccessful = true;
+              confirmedAmount = Number(successfulTx.amount || amount_paid);
             }
+          }
         }
 
         if (!isSuccessful) {
@@ -67,43 +94,42 @@ async function syncPayments() {
           continue;
         }
 
-        console.log(`   💰 Payment CONFIRMED by Flutterwave!`);
+        console.log(`   💰 Payment CONFIRMED by Flutterwave! (Amount: ₦${confirmedAmount})`);
 
-        // 3. Check if an Admin has already activated this user manually 
-        // (We check if there's any completed 'cash' payment AFTER this pending payment)
+        // 2. Check if an Admin has already activated this user manually
+        // (Prevent duplicate fulfillment if an admin logged a cash activation after this payment request)
         const manualCheck = await db.query(`
-            SELECT id FROM payments 
-            WHERE user_id = $1 
-              AND status = 'completed' 
-              AND method = 'cash' 
-              AND created_at > $2
-            LIMIT 1
+          SELECT id FROM payments 
+          WHERE user_id = $1 
+            AND status = 'completed' 
+            AND method = 'cash' 
+            AND created_at > $2
+          LIMIT 1
         `, [user_id, payment.created_at]);
 
         if (manualCheck.rowCount > 0) {
-            console.log(`   ⚠️ Admin has already activated this user manually! Marking DB record as completed to prevent double-billing.`);
-            // Just mark this pending payment as completed without triggering the webhook
-            await db.query(`UPDATE payments SET status = 'completed' WHERE id = $1`, [payment_id]);
-            confirmedCount++;
-            continue;
+          console.log(`   ⚠️ Admin has already activated this user manually! Marking DB record as completed to prevent double-billing.`);
+          await db.query(`UPDATE payments SET status = 'completed' WHERE id = $1`, [payment_id]);
+          confirmedCount++;
+          continue;
         }
 
-        console.log(`   🚀 User was NOT manually activated. Triggering Webhook automatically...`);
-        
-        // 4. Trigger the webhook manually to provision them on MikroTik & WhatsApp
+        console.log(`   🚀 User was NOT manually activated. Triggering Webhook automatically via port ${botPort}...`);
+
+        // 3. Trigger the webhook manually to provision them on MikroTik & WhatsApp/Telegram
         const payload = {
           "event.type": "BANK_TRANSFER_TRANSACTION",
           status: "successful",
           txRef: tx_ref,
-          amount: amount_paid,
+          amount: confirmedAmount,
           data: {
             status: "successful",
             tx_ref: tx_ref,
-            amount: amount_paid
+            amount: confirmedAmount
           }
         };
 
-        const webhookRes = await fetch('http://localhost:3003/webhook/flutterwave', {
+        const webhookRes = await fetch(`http://localhost:${botPort}/webhook/flutterwave`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -113,11 +139,11 @@ async function syncPayments() {
         });
 
         if (webhookRes.ok) {
-            console.log(`   ✅ Successfully triggered Webhook! Bot should be messaging them now.`);
-            confirmedCount++;
+          console.log(`   ✅ Successfully triggered Webhook! Bot should be messaging them now.`);
+          confirmedCount++;
         } else {
-            console.error(`   ❌ Failed to trigger Webhook (Status: ${webhookRes.status}). Is the bot running?`);
-            failedCount++;
+          console.error(`   ❌ Failed to trigger Webhook (Status: ${webhookRes.status}). Is the bot running?`);
+          failedCount++;
         }
 
       } catch (err) {

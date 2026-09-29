@@ -11,7 +11,8 @@
     "db:seed": "node --env-file=.env db/seed.js",
     "ft:test": "node --env-file=.env scripts/test-flutter.js",
     "rev:test": "node --env-file=.env scripts/test-revenue.js",
-    "clean:mikrotik": "node --env-file=.env clean-mikrotik.js"
+    "clean:mikrotik": "node --env-file=.env db/cleanup-expired.js",
+    "sync:payments": "node --env-file=.env sync-payments.js"
   },
   "keywords": [
     "starlink",
