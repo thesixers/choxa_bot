@@ -104,14 +104,15 @@ async function activateNewLogins(db) {
 
     // Fetch active sessions from MikroTik (fastest check for who is currently online)
     const activeSessions = await getActiveSessions();
-    const activePins = new Set(activeSessions.map((s) => s.user));
+    const activePins = new Set(activeSessions.map((s) => String(s.user)));
 
     for (const sub of unactivated) {
-      let hasLoggedIn = activePins.has(sub.pin);
+      const pinStr = String(sub.pin);
+      let hasLoggedIn = activePins.has(pinStr);
 
       // If not currently connected, check if router reports any uptime accumulated
       if (!hasLoggedIn) {
-        const mkUser = await getHotspotUser(sub.pin);
+        const mkUser = await getHotspotUser(pinStr);
         if (mkUser && mkUser.uptime && mkUser.uptime !== "0s" && mkUser.uptime !== "00:00:00") {
           hasLoggedIn = true;
         }
@@ -185,18 +186,21 @@ async function expireOverdueTickets(db) {
     for (const sub of rows) {
       try {
         // Safety check: verify router state
-        const mkUser = await getHotspotUser(sub.pin);
-        if (mkUser && (mkUser.uptime === "0s" || mkUser.uptime === "00:00:00")) {
-          // Extra guard: If user somehow has 0 uptime, do not delete
-          console.warn(`⚠️ Ticket PIN ${sub.pin} has 0 uptime on router — skipping deletion.`);
+        const pinStr = String(sub.pin);
+        const mkUser = await getHotspotUser(pinStr);
+        if (mkUser && (!mkUser.uptime || mkUser.uptime === "0s" || mkUser.uptime === "00:00:00")) {
+          // Extra guard: If user has 0 uptime on router, they never actually used it!
+          // Reset them to unactivated state so they don't lose their ticket.
+          console.warn(`⚠️ Ticket PIN ${pinStr} has 0 uptime on router — resetting to unactivated state.`);
+          await db.query(`UPDATE subscriptions SET start_time = NULL, expiry_time = NULL WHERE id = $1`, [sub.id]);
           continue;
         }
 
         // 1. Kick any active session
-        await removeActiveSessions(sub.pin);
+        await removeActiveSessions(pinStr);
 
         // 2. Remove from MikroTik (silently handles already-removed users)
-        await removeHotspotUser(sub.pin);
+        await removeHotspotUser(pinStr);
 
         // 3. Mark expired in DB
         await db.query(
