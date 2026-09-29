@@ -124,13 +124,4 @@ export function startTelegramBot(db, onMessage) {
 
   console.log("🤖 Telegram Bot connecting...");
   tryConnect();
-} const delay = Math.min(60_000, 5_000 * attempt);
-console.warn(`⚠️ Telegram connection attempt ${attempt} failed: ${err.message}`);
-console.log(`⏳ Retrying Telegram in ${Math.round(delay / 1000)}s...`);
-setTimeout(() => tryConnect(attempt + 1), delay);
-    }
-  }
-
-console.log("🤖 Telegram Bot connecting...");
-tryConnect();
 }
