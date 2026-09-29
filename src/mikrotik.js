@@ -43,6 +43,43 @@ export function buildMikrotikComment(phone, planName) {
 }
 
 /**
+ * Resolves or formats the limit-uptime string for a plan (e.g. '1d 00:00:00' or '0d 01:00:00').
+ * @param {object} plan
+ * @returns {string|null}
+ */
+export function resolveDurationStr(plan) {
+  if (plan?.duration_str && String(plan.duration_str).trim()) {
+    return String(plan.duration_str).trim();
+  }
+  const days = Number(plan?.duration_days);
+  if (days === 0.04 || plan?.name?.toLowerCase().includes("hour")) {
+    return "0d 01:00:00";
+  }
+  if (!isNaN(days) && days > 0) {
+    return `${Math.round(days)}d 00:00:00`;
+  }
+  return null;
+}
+
+/**
+ * Calculates the wall-clock expiry Date given a plan and starting date.
+ * @param {object} plan
+ * @param {Date} [fromDate]
+ * @returns {Date}
+ */
+export function calculateExpiryDate(plan, fromDate = new Date()) {
+  const expiry = new Date(fromDate);
+  const durStr = resolveDurationStr(plan);
+  if (durStr && durStr.includes("01:00:00")) {
+    expiry.setHours(expiry.getHours() + 1);
+  } else {
+    const days = Number(plan?.duration_days) || 1;
+    expiry.setTime(expiry.getTime() + days * 24 * 60 * 60 * 1000);
+  }
+  return expiry;
+}
+
+/**
  * Generates a random 7-digit numeric login PIN (matching MikroTicket app).
  * @returns {string}
  */

@@ -97,7 +97,7 @@ async function run() {
 
     // Look up in our DB by PIN
     const { rows } = await db.query(
-      `SELECT s.id, s.status, s.expiry_time, u.phone, pl.name AS plan_name
+      `SELECT s.id, s.status, s.start_time, s.expiry_time, u.phone, pl.name AS plan_name
        FROM subscriptions s
        JOIN users u  ON u.id  = s.user_id
        JOIN plans pl ON pl.id = s.plan_id
@@ -113,6 +113,15 @@ async function run() {
     }
 
     const sub = rows[0];
+
+    // 🛡️ UNUSED TICKET PROTECTION:
+    // If never activated or router uptime is 0, protect it so customer doesn't lose money!
+    const isUnused = (!sub.start_time && !sub.expiry_time) || ru.uptime === "00:00:00" || ru.uptime === "0s";
+    if (isUnused && sub.status === "active") {
+      stillActive.push({ pin, plan_name: sub.plan_name, phone: sub.phone, expiry_time: "Not activated yet (unused)" });
+      continue;
+    }
+
     const isExpiredByTime = sub.expiry_time && new Date(sub.expiry_time) < now;
     const isOrphan        = sub.status === "expired"; // DB expired but still on router
 
@@ -129,10 +138,13 @@ async function run() {
   // ── Step 4: Print full report ─────────────────────────────────────────────
   console.log("─".repeat(60));
 
-  console.log(`\n✅ ACTIVE — will NOT be touched (${stillActive.length})`);
-  stillActive.forEach((r) =>
-    console.log(`   PIN ${r.pin} | ${r.plan_name} | ${r.phone} | expires ${new Date(r.expiry_time).toLocaleString()}`)
-  );
+  console.log(`\n✅ ACTIVE / UNUSED — will NOT be touched (${stillActive.length})`);
+  stillActive.forEach((r) => {
+    const expStr = r.expiry_time && !isNaN(new Date(r.expiry_time))
+      ? `expires ${new Date(r.expiry_time).toLocaleString()}`
+      : String(r.expiry_time || "Pending first login");
+    console.log(`   PIN ${r.pin} | ${r.plan_name} | ${r.phone} | ${expStr}`);
+  });
 
   console.log(`\n🟢 CONNECTED RIGHT NOW — skipped (${connectedNow.length})`);
   connectedNow.forEach((pin) => console.log(`   PIN ${pin}`));

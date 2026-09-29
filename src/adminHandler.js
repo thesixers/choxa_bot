@@ -1,4 +1,11 @@
-import { provisionHotspotUser, removeHotspotUser, removeActiveSessions, buildMikrotikComment, getMikrotikClient } from "./mikrotik.js";
+import { 
+  provisionHotspotUser, 
+  removeHotspotUser, 
+  removeActiveSessions, 
+  buildMikrotikComment, 
+  getMikrotikClient,
+  resolveDurationStr 
+} from "./mikrotik.js";
 import { generateUniquePin } from "./fulfillPayment.js";
 import { sendMessage } from "./messaging.js";
 import config from "./config.js";
@@ -76,7 +83,7 @@ export async function handleAdminMessage(platform, remoteId, from, text, db) {
   if (cmd === "!stats") {
     const [totalUsersRes, activeTicketsRes, revenueRes, pendingProvRes] = await Promise.all([
       db.query(`SELECT COUNT(*) FROM users`),
-      db.query(`SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND expiry_time > NOW()`),
+      db.query(`SELECT COUNT(*) FROM subscriptions WHERE status = 'active' AND (expiry_time > NOW() OR expiry_time IS NULL)`),
       db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE status = 'completed'`),
       db.query(`SELECT COUNT(*) FROM provisioning_queue WHERE status = 'pending'`),
     ]);
@@ -479,25 +486,18 @@ async function executeGenerateTicket(from, plan, cleanPhone, db) {
       [userId, plan.price],
     );
 
-    // 2. Record subscription
-    const expiryTime = new Date();
-    if (plan.duration_str && plan.duration_str.includes("01:00:00")) {
-      expiryTime.setHours(expiryTime.getHours() + 1);
-    } else {
-      const days = Number(plan.duration_days) || 1;
-      expiryTime.setTime(expiryTime.getTime() + days * 24 * 60 * 60 * 1000);
-    }
-
+    // 2. Record subscription as unactivated (countdown begins on first login)
     await db.query(
       `INSERT INTO subscriptions (user_id, plan_id, pin, status, start_time, expiry_time)
-       VALUES ($1, $2, $3, 'active', CURRENT_TIMESTAMP, $4)
+       VALUES ($1, $2, $3, 'active', NULL, NULL)
        ON CONFLICT (pin) DO NOTHING`,
-      [userId, plan.id, pin, expiryTime],
+      [userId, plan.id, pin],
     );
 
-    // 3. Provision on MikroTik
+    // 3. Provision on MikroTik with guaranteed limit-uptime
     const comment = buildMikrotikComment(cleanPhone, plan.name);
-    await provisionHotspotUser(pin, plan.mikrotik_profile, comment, plan.duration_str || null);
+    const limitUptime = resolveDurationStr(plan);
+    await provisionHotspotUser(pin, plan.mikrotik_profile, comment, limitUptime);
 
     // 4. Send to user if phone provided
     if (cleanPhone) {
@@ -510,7 +510,8 @@ async function executeGenerateTicket(from, plan, cleanPhone, db) {
         `1. Connect to Wi-Fi (*${config.hotspotSsid}*)\n` +
         `2. Open your browser (*${config.portalUrl}*)\n` +
         `3. Enter Login PIN: \`${pin}\` in the box\n` +
-        `4. Tap Connect & enjoy! 🛰️`,
+        `4. Tap Connect & enjoy! 🛰️\n\n` +
+        `ℹ️ _Your plan starts counting once you log in._`,
         { sendToBoth: true },
       );
     }
@@ -522,7 +523,8 @@ async function executeGenerateTicket(from, plan, cleanPhone, db) {
       `📦 Plan: *${plan.name}* (₦${Number(plan.price).toLocaleString()})\n` +
       `🔑 *Login PIN:* \`${pin}\`\n` +
       (cleanPhone ? `📱 Sent to: +${cleanPhone}\n` : "") +
-      `✅ Provisioned on MikroTik (${plan.mikrotik_profile})`,
+      `✅ Provisioned on MikroTik (${plan.mikrotik_profile})\n` +
+      `⏳ Countdown starts on user's first login.`,
     );
     return true;
   } catch (err) {

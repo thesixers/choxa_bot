@@ -1,6 +1,12 @@
 import { sendMessage } from "./messaging.js";
 import { processPendingQueue } from "./provisioningQueue.js";
-import { removeHotspotUser } from "./mikrotik.js";
+import {
+  removeHotspotUser,
+  removeActiveSessions,
+  getActiveSessions,
+  getHotspotUser,
+  calculateExpiryDate,
+} from "./mikrotik.js";
 import config from "./config.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,11 +78,89 @@ async function retryOfflineMessages(db) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Job B — Expire overdue tickets (Runs every 5 minutes)
+// Job B — Activate tickets on first login (Runs every 1 minute)
 // ─────────────────────────────────────────────────────────────────────────────
-// Finds active subscriptions whose wall-clock expiry_time has passed,
-// removes the PIN from MikroTik, marks the subscription expired in the DB,
-// and sends the user a notification.
+// Finds active subscriptions that have not started counting yet (start_time IS NULL).
+// Checks MikroTik to see if the user has logged in (in active sessions or uptime > 0).
+// When detected:
+//  - sets start_time = NOW()
+//  - calculates expiry_time = NOW() + plan_duration
+//  - notifies the user on WhatsApp that their time is now counting
+// ─────────────────────────────────────────────────────────────────────────────
+async function activateNewLogins(db) {
+  try {
+    const { rows: unactivated } = await db.query(`
+      SELECT s.id, s.pin, pl.id AS plan_id, pl.name AS plan_name,
+             pl.duration_days, pl.duration_str, u.phone
+      FROM subscriptions s
+      JOIN plans pl ON pl.id = s.plan_id
+      LEFT JOIN users u ON u.id = s.user_id
+      WHERE s.status = 'active'
+        AND s.start_time IS NULL
+      LIMIT 50
+    `);
+
+    if (!unactivated.length) return;
+
+    // Fetch active sessions from MikroTik (fastest check for who is currently online)
+    const activeSessions = await getActiveSessions();
+    const activePins = new Set(activeSessions.map((s) => s.user));
+
+    for (const sub of unactivated) {
+      let hasLoggedIn = activePins.has(sub.pin);
+
+      // If not currently connected, check if router reports any uptime accumulated
+      if (!hasLoggedIn) {
+        const mkUser = await getHotspotUser(sub.pin);
+        if (mkUser && mkUser.uptime && mkUser.uptime !== "0s" && mkUser.uptime !== "00:00:00") {
+          hasLoggedIn = true;
+        }
+      }
+
+      if (hasLoggedIn) {
+        const now = new Date();
+        const expiryTime = calculateExpiryDate(sub, now);
+
+        await db.query(
+          `UPDATE subscriptions 
+           SET start_time = $1, expiry_time = $2 
+           WHERE id = $3`,
+          [now, expiryTime, sub.id],
+        );
+
+        console.log(`🚀 Activated ticket PIN ${sub.pin} (${sub.plan_name}) — expires at ${expiryTime.toLocaleString()}`);
+
+        if (sub.phone) {
+          const formattedExpiry = expiryTime.toLocaleString("en-GB", {
+            day: "2-digit",
+            month: "short",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          await sendMessage(
+            sub.phone,
+            `🚀 *Your ${config.ispName} Ticket is Now Active!*\n\n` +
+            `📦 Plan: *${sub.plan_name}*\n` +
+            `🎟️ PIN: \`${sub.pin}\`\n` +
+            `⏰ *Valid Until:* ${formattedExpiry}\n\n` +
+            `Enjoy high-speed browsing! 🛰️`,
+            { sendToBoth: true },
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Scheduler: activateNewLogins error:", err.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Job C — Expire overdue tickets (Runs every 2 minutes)
+// ─────────────────────────────────────────────────────────────────────────────
+// Finds active subscriptions that have been activated (start_time IS NOT NULL)
+// whose wall-clock expiry_time has passed.
+// Double-checks that the user actually used time on MikroTik before removal.
+// Removes the PIN from MikroTik, marks DB expired, and notifies user.
 // ─────────────────────────────────────────────────────────────────────────────
 async function expireOverdueTickets(db) {
   try {
@@ -86,6 +170,7 @@ async function expireOverdueTickets(db) {
       JOIN users u  ON u.id  = s.user_id
       JOIN plans pl ON pl.id = s.plan_id
       WHERE s.status = 'active'
+        AND s.start_time IS NOT NULL
         AND s.expiry_time IS NOT NULL
         AND s.expiry_time < NOW()
       ORDER BY s.expiry_time ASC
@@ -95,30 +180,43 @@ async function expireOverdueTickets(db) {
 
     if (!rows.length) return;
 
-    console.log(`⏰ Expiry job: found ${rows.length} overdue ticket(s)`);
+    console.log(`⏰ Expiry job: found ${rows.length} overdue activated ticket(s)`);
 
     for (const sub of rows) {
       try {
-        // 1. Remove from MikroTik (silently handles already-removed users)
+        // Safety check: verify router state
+        const mkUser = await getHotspotUser(sub.pin);
+        if (mkUser && (mkUser.uptime === "0s" || mkUser.uptime === "00:00:00")) {
+          // Extra guard: If user somehow has 0 uptime, do not delete
+          console.warn(`⚠️ Ticket PIN ${sub.pin} has 0 uptime on router — skipping deletion.`);
+          continue;
+        }
+
+        // 1. Kick any active session
+        await removeActiveSessions(sub.pin);
+
+        // 2. Remove from MikroTik (silently handles already-removed users)
         await removeHotspotUser(sub.pin);
 
-        // 2. Mark expired in DB
+        // 3. Mark expired in DB
         await db.query(
           `UPDATE subscriptions SET status = 'expired' WHERE id = $1`,
-          [sub.id]
+          [sub.id],
         );
 
-        console.log(`✅ Expired ticket PIN ${sub.pin} (${sub.plan_name}) for ${sub.phone}`);
+        console.log(`✅ Expired ticket PIN ${sub.pin} (${sub.plan_name}) for ${sub.phone || "Walk-in"}`);
 
-        // 3. Notify the user
-        await sendMessage(
-          sub.phone,
-          `⏰ *Your ${config.ispName} Plan Has Expired*\n\n` +
-          `📦 Plan: *${sub.plan_name}*\n` +
-          `🎟️ PIN: \`${sub.pin}\`\n\n` +
-          `To continue enjoying internet access, send *Hi* to purchase a new plan. 🚀`,
-          { sendToBoth: true }
-        );
+        // 4. Notify the user
+        if (sub.phone) {
+          await sendMessage(
+            sub.phone,
+            `⏰ *Your ${config.ispName} Plan Has Expired*\n\n` +
+            `📦 Plan: *${sub.plan_name}*\n` +
+            `🎟️ PIN: \`${sub.pin}\`\n\n` +
+            `To continue enjoying internet access, send *Hi* to purchase a new plan. 🚀`,
+            { sendToBoth: true },
+          );
+        }
       } catch (err) {
         console.error(`❌ Failed to expire ticket PIN ${sub.pin}:`, err.message);
       }
@@ -134,24 +232,31 @@ async function expireOverdueTickets(db) {
 export function startScheduler(db) {
   console.log("⏱️  Scheduler started.");
 
-  // Run provisioning queue check every 30 seconds
+  // 1. Run provisioning queue check every 30 seconds
   setInterval(() => {
     processPendingQueue(db).catch((err) =>
       console.error("Error in processPendingQueue:", err.message),
     );
   }, 30 * 1000);
 
-  // Run offline message retries every 3 minutes
+  // 2. Run first-login activation check every 60 seconds
+  setInterval(() => {
+    activateNewLogins(db).catch((err) =>
+      console.error("Error in activateNewLogins:", err.message),
+    );
+  }, 60 * 1000);
+
+  // 3. Run ticket expiry check every 2 minutes
+  setInterval(() => {
+    expireOverdueTickets(db).catch((err) =>
+      console.error("Error in expireOverdueTickets:", err.message),
+    );
+  }, 2 * 60 * 1000);
+
+  // 4. Run offline message retries every 3 minutes
   setInterval(() => {
     retryOfflineMessages(db).catch((err) =>
       console.error("Error in retryOfflineMessages:", err.message),
     );
   }, 3 * 60 * 1000);
-
-  // Run ticket expiry check every 5 minutes
-  setInterval(() => {
-    expireOverdueTickets(db).catch((err) =>
-      console.error("Error in expireOverdueTickets:", err.message),
-    );
-  }, 5 * 60 * 1000);
 }

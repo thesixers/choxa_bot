@@ -1,4 +1,4 @@
-import { provisionHotspotUser, buildMikrotikComment, generatePin } from "./mikrotik.js";
+import { provisionHotspotUser, buildMikrotikComment, generatePin, resolveDurationStr } from "./mikrotik.js";
 import { enqueueProvisioning } from "./provisioningQueue.js";
 import { sendMessage } from "./messaging.js";
 import config from "./config.js";
@@ -119,22 +119,13 @@ export async function fulfillPayment(db, user, amountPaid) {
   // 6. Generate unique Ticket PIN
   const pin = await generateUniquePin(db);
 
-  // 7. Calculate estimated expiry for DB records
-  const expiryTime = new Date();
-  if (plan.duration_str && plan.duration_str.includes("01:00:00")) {
-    expiryTime.setHours(expiryTime.getHours() + 1);
-  } else {
-    const days = Number(plan.duration_days) || 1;
-    expiryTime.setTime(expiryTime.getTime() + days * 24 * 60 * 60 * 1000);
-  }
-
-  // 8. Record subscription
+  // 7. Record subscription as unactivated (countdown begins on first login)
   await db.query(
     `
         INSERT INTO subscriptions (user_id, plan_id, pin, status, start_time, expiry_time, alert_sent)
-        VALUES ($1, $2, $3, 'active', CURRENT_TIMESTAMP, $4, false)
+        VALUES ($1, $2, $3, 'active', NULL, NULL, false)
     `,
-    [user.id, plan.id, pin, expiryTime],
+    [user.id, plan.id, pin],
   );
 
   // Update latest pin on users record for tracking
@@ -149,7 +140,7 @@ export async function fulfillPayment(db, user, amountPaid) {
     [user.phone],
   );
 
-  // 9. Provision ticket into MikroTik or Queue
+  // 8. Provision ticket into MikroTik or Queue
   await provisionOrQueueTicket(db, user, plan, pin);
 }
 
@@ -164,13 +155,14 @@ export async function provisionOrQueueTicket(
   suppressSuccessMessage = false,
 ) {
   const comment = buildMikrotikComment(user.phone, plan.name);
+  const limitUptime = resolveDurationStr(plan);
 
   try {
     await provisionHotspotUser(
       pin,
       plan.mikrotik_profile,
       comment,
-      plan.duration_str || null,
+      limitUptime,
     );
 
     console.log(`✅ Ticket PIN ${pin} provisioned on MikroTik for ${user.phone}`);
@@ -185,7 +177,8 @@ export async function provisionOrQueueTicket(
         `1. Connect to Wi-Fi (*${config.hotspotSsid}*)\n` +
         `2. Open your browser (*${config.portalUrl}*)\n` +
         `3. Enter your Login PIN: \`${pin}\` in the box\n` +
-        `4. Tap Connect & enjoy! 🚀`,
+        `4. Tap Connect & enjoy! 🚀\n\n` +
+        `ℹ️ _Your plan starts counting once you log in._`,
         { sendToBoth: true },
       );
     }
@@ -199,7 +192,8 @@ export async function provisionOrQueueTicket(
         `📦 Plan: *${plan.name}*\n` +
         `🎟️ *Your Login PIN:* \`${pin}\`\n\n` +
         `⚙️ Router connection is syncing. Your PIN \`${pin}\` will be active within 2 minutes.\n\n` +
-        `Connect to Wi-Fi (*${config.hotspotSsid}*) and enter Login PIN: \`${pin}\` to connect!`,
+        `Connect to Wi-Fi (*${config.hotspotSsid}*) and enter Login PIN: \`${pin}\` to connect!\n\n` +
+        `ℹ️ _Your plan starts counting once you log in._`,
         { sendToBoth: true },
       );
     }
@@ -211,7 +205,7 @@ export async function provisionOrQueueTicket(
         mikrotikProfile: plan.mikrotik_profile,
         planName: plan.name,
         pin,
-        durationStr: plan.duration_str,
+        durationStr: limitUptime,
       });
     } catch (queueErr) {
       console.error("Failed to enqueue provisioning job:", queueErr.message);
