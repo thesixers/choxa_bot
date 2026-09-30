@@ -2,12 +2,12 @@ import { provisionHotspotUser, buildMikrotikComment } from "./mikrotik.js";
 import { sendMessage } from "./messaging.js";
 import config from "./config.js";
 
-// Retry backoff schedule (minutes per attempt index)
-const BACKOFF_MINUTES = [2, 5, 10, 15, 30, 60, 60, 60, 60, 60];
+// Retry interval: check quickly so when router/power comes online, tickets provision promptly (max 2-3 mins)
+const RETRY_INTERVAL_MINUTES = 2;
 
 /**
  * Adds a failed provisioning job to the retry queue.
- * The scheduler will keep retrying until max_attempts is reached.
+ * The scheduler will keep retrying indefinitely until the router connects.
  */
 export async function enqueueProvisioning(
   db,
@@ -17,12 +17,12 @@ export async function enqueueProvisioning(
     `
         INSERT INTO provisioning_queue
             (user_id, phone, mikrotik_profile, plan_name, pin, next_retry_at)
-        VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '2 minutes')
+        VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 minute')
     `,
     [userId, phone, mikrotikProfile, planName, pin],
   );
 
-  console.log(`📋 Provisioning queued for ticket ${pin} (${phone}) — will retry in 2 minutes`);
+  console.log(`📋 Provisioning queued for ticket ${pin} (${phone}) — will retry automatically`);
 }
 
 /**
@@ -34,7 +34,7 @@ export async function processPendingQueue(db) {
         SELECT pq.*, pl.duration_str 
         FROM provisioning_queue pq
         LEFT JOIN plans pl ON pl.mikrotik_profile = pq.mikrotik_profile
-        WHERE pq.status = 'pending' AND pq.next_retry_at <= NOW()
+        WHERE pq.status IN ('pending', 'abandoned') AND pq.next_retry_at <= NOW()
         ORDER BY pq.next_retry_at ASC
         LIMIT 10
     `);
@@ -50,7 +50,7 @@ export async function processPendingQueue(db) {
 
 async function processJob(db, job) {
   const attempt = job.attempts + 1;
-  console.log(`🔄 Provisioning attempt ${attempt}/${job.max_attempts} for ticket PIN ${job.pin} (${job.phone})`);
+  console.log(`🔄 Provisioning attempt ${attempt} for ticket PIN ${job.pin} (${job.phone})`);
 
   // Mark attempt in progress
   await db.query(
@@ -97,36 +97,15 @@ async function processJob(db, job) {
   } catch (err) {
     console.error(`❌ Provisioning attempt ${attempt} failed for ticket PIN ${job.pin}:`, err.message);
 
-    if (attempt >= job.max_attempts) {
-      await db.query(
-        `
-            UPDATE provisioning_queue SET status = 'abandoned' WHERE id = $1
-        `,
-        [job.id],
-      );
-
-      console.error(`🚫 Provisioning permanently failed for ticket ${job.pin} after ${attempt} attempts`);
-
-      await sendMessage(
-        job.phone,
-        `⚠️ *Ticket Setup Delayed*\n\n` +
-          `Your payment was received, but we've been unable to automatically connect with the hotspot router.\n\n` +
-          `Your Login PIN is: \`${job.pin}\`\n\n` +
-          `Please contact support to activate it manually:\n` +
-          `📞 Support: *${config.supportPhone}*`,
-        { sendToBoth: true },
-      );
-    } else {
-      const backoffMins = BACKOFF_MINUTES[attempt] ?? 60;
-      await db.query(
-        `
-            UPDATE provisioning_queue
-            SET next_retry_at = NOW() + ($1 || ' minutes')::INTERVAL
-            WHERE id = $2
-        `,
-        [backoffMins, job.id],
-      );
-      console.log(`⏳ Next retry for ticket ${job.pin} in ${backoffMins} minutes`);
-    }
+    // Never abandon a paid ticket! Keep retrying every 2 minutes until the router is reachable.
+    await db.query(
+      `
+          UPDATE provisioning_queue
+          SET next_retry_at = NOW() + ($1 || ' minutes')::INTERVAL
+          WHERE id = $2
+      `,
+      [RETRY_INTERVAL_MINUTES, job.id],
+    );
+    console.log(`⏳ Next retry for ticket ${job.pin} in ${RETRY_INTERVAL_MINUTES} minutes (Attempt ${attempt})`);
   }
 }
