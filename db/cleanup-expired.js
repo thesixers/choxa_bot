@@ -182,6 +182,18 @@ async function run() {
       await client.delete(`/ip/hotspot/user/${encodeURIComponent(rid)}`);
       console.log(`  🗑️  Removed PIN ${pin} from router`);
       removed++;
+
+      // Also purge any MAC cookies for this PIN
+      try {
+        const cookieRes = await client.get("/ip/hotspot/cookie");
+        const cookies = Array.isArray(cookieRes.data) ? cookieRes.data : [];
+        for (const c of cookies.filter((ck) => ck.user === pin)) {
+          if (c[".id"]) {
+            await client.delete(`/ip/hotspot/cookie/${encodeURIComponent(c[".id"])}`);
+            console.log(`  🍪  Purged MAC cookie for PIN ${pin}`);
+          }
+        }
+      } catch (_) {}
     } catch (err) {
       if (err.response?.status === 404) {
         console.log(`  ⚠️  PIN ${pin} already gone from router`);
@@ -195,6 +207,43 @@ async function run() {
 
     await db.query(`UPDATE subscriptions SET status = 'expired' WHERE id = $1`, [sub.id]);
     console.log(`  ✅  DB subscription ${sub.id} marked expired\n`);
+  }
+
+  // ── Step 5.5: Sweep orphan/leftover cookies for expired subscriptions ─────
+  console.log("🍪 Sweeping lingering MAC cookies on router...");
+  try {
+    const cookieRes = await client.get("/ip/hotspot/cookie");
+    const allCookies = Array.isArray(cookieRes.data) ? cookieRes.data : [];
+    let purgedCookies = 0;
+
+    for (const c of allCookies) {
+      if (!c.user) continue;
+      // Only purge if user is in our DB and NOT active
+      const subCheck = await db.query(
+        `SELECT id FROM subscriptions 
+         WHERE pin = $1 
+           AND status = 'active' 
+           AND (expiry_time IS NULL OR expiry_time > NOW()) 
+         LIMIT 1`,
+        [c.user]
+      );
+      if (subCheck.rowCount === 0) {
+        // Also check if this user exists in subscriptions at all (to avoid touching external users)
+        const isOurTicket = await db.query(`SELECT id FROM subscriptions WHERE pin = $1 LIMIT 1`, [c.user]);
+        if (isOurTicket.rowCount > 0 && c[".id"]) {
+          await client.delete(`/ip/hotspot/cookie/${encodeURIComponent(c[".id"])}`);
+          purgedCookies++;
+          console.log(`  🍪 Purged orphan MAC cookie for expired PIN ${c.user}`);
+        }
+      }
+    }
+    if (purgedCookies > 0) {
+      console.log(`\n  ✅ Purged total of ${purgedCookies} expired MAC cookie(s) from router.\n`);
+    } else {
+      console.log(`  ✅ No orphan cookies found.\n`);
+    }
+  } catch (cErr) {
+    console.warn("⚠️  Could not sweep cookies:", cErr.message);
   }
 
   // ── Step 6: Summary ───────────────────────────────────────────────────────

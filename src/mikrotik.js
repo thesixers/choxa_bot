@@ -275,11 +275,15 @@ export async function updateHotspotUser(userId, data) {
  * Removes a hotspot user from MikroTik via HTTP REST API.
  * Endpoint: DELETE /ip/hotspot/user/<userid>
  * Silently handles cases where user is already deleted.
+ * Also purges any lingering MAC cookies for this user.
  * @param {string} username - The ticket PIN / username to remove
  */
 export async function removeHotspotUser(username) {
   const client = getMikrotikClient();
   try {
+    // Purge any cookies associated with this user PIN
+    await removeHotspotCookies(username);
+
     const user = await getHotspotUser(username);
     if (!user || !user[".id"]) {
       console.warn(`⚠️ MikroTik (HTTP): user '${username}' not found — already removed`);
@@ -332,7 +336,49 @@ export async function getActiveSessions(username = null) {
 }
 
 /**
+ * Removes all active hotspot cookies for a given ticket PIN from MikroTik.
+ * Endpoint: GET /ip/hotspot/cookie, DELETE /ip/hotspot/cookie/<id>
+ * @param {string} username - The ticket PIN whose cookies should be removed
+ * @returns {Promise<number>} Number of cookies purged
+ */
+export async function removeHotspotCookies(username) {
+  const client = getMikrotikClient();
+  try {
+    let cookies = [];
+    try {
+      const res = await client.get("/ip/hotspot/cookie", {
+        params: { user: username },
+      });
+      const data = Array.isArray(res.data) ? res.data : (res.data ? [res.data] : []);
+      cookies = data.filter((c) => c.user === username);
+    } catch {
+      // Fallback: fetch all cookies and filter client-side
+      const res = await client.get("/ip/hotspot/cookie");
+      const data = Array.isArray(res.data) ? res.data : [];
+      cookies = data.filter((c) => c.user === username);
+    }
+
+    if (!cookies.length) {
+      return 0;
+    }
+
+    for (const cookie of cookies) {
+      if (cookie[".id"]) {
+        await client.delete(`/ip/hotspot/cookie/${encodeURIComponent(cookie[".id"])}`);
+      }
+    }
+
+    console.log(`🍪 MikroTik (HTTP): purged ${cookies.length} MAC cookie(s) for '${username}'`);
+    return cookies.length;
+  } catch (err) {
+    console.warn(`⚠️ MikroTik (HTTP): removeHotspotCookies failed for '${username}':`, err.message);
+    return 0;
+  }
+}
+
+/**
  * Removes all active hotspot sessions for a given ticket PIN from MikroTik.
+ * Also purges their MAC cookies so the device cannot immediately auto-reconnect.
  * Endpoint: DELETE /ip/hotspot/active/<sessionid>
  * @param {string} username - The ticket PIN whose sessions should be removed
  * @returns {Promise<number>} Number of active sessions kicked
@@ -342,18 +388,20 @@ export async function removeActiveSessions(username) {
   try {
     const sessions = await getActiveSessions(username);
 
-    if (!sessions.length) {
-      console.log(`ℹ️ MikroTik (HTTP): no active session for '${username}' — skipping`);
-      return 0;
-    }
-
-    for (const session of sessions) {
-      if (session[".id"]) {
-        await client.delete(`/ip/hotspot/active/${encodeURIComponent(session[".id"])}`);
+    if (sessions.length) {
+      for (const session of sessions) {
+        if (session[".id"]) {
+          await client.delete(`/ip/hotspot/active/${encodeURIComponent(session[".id"])}`);
+        }
       }
+      console.log(`⚡ MikroTik (HTTP): removed ${sessions.length} active session(s) for '${username}'`);
+    } else {
+      console.log(`ℹ️ MikroTik (HTTP): no active session for '${username}' — skipping`);
     }
 
-    console.log(`⚡ MikroTik (HTTP): removed ${sessions.length} active session(s) for '${username}'`);
+    // Always purge MAC cookies as well so device cannot auto-reconnect
+    await removeHotspotCookies(username);
+
     return sessions.length;
   } catch (err) {
     console.warn(`⚠️ MikroTik (HTTP): removeActiveSessions failed for '${username}':`, err.message);
