@@ -44,10 +44,10 @@ async function syncPayments() {
         let isSuccessful = false;
         let confirmedAmount = Number(amount_paid);
 
-        // 1. Verify with Flutterwave API (verify-by-reference first)
+        // 1. Verify with Flutterwave API (verify_by_reference first)
         try {
           const verifyRes = await fetch(
-            `https://api.flutterwave.com/v3/transactions/verify-by-reference?tx_ref=${encodeURIComponent(tx_ref)}`,
+            `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(tx_ref)}`,
             {
               method: "GET",
               headers: {
@@ -56,35 +56,42 @@ async function syncPayments() {
               },
             }
           );
-          const verifyData = await verifyRes.json();
-          if (verifyData.status === "success" && verifyData.data?.status === "successful") {
-            isSuccessful = true;
-            confirmedAmount = Number(verifyData.data.amount || amount_paid);
+          if (verifyRes.ok) {
+            const verifyData = await verifyRes.json();
+            if (verifyData.status === "success" && verifyData.data?.status === "successful") {
+              isSuccessful = true;
+              confirmedAmount = Number(verifyData.data.amount || amount_paid);
+            }
           }
         } catch (vErr) {
-          console.warn(`   ⚠️ verify-by-reference check returned:`, vErr.message);
+          console.warn(`   ⚠️ verify_by_reference check returned:`, vErr.message);
         }
 
-        // Fallback: Check /transactions list by tx_ref if verify-by-reference didn't confirm
+        // Fallback: Check /transactions list by tx_ref if verify_by_reference didn't confirm
         if (!isSuccessful) {
-          const flwRes = await fetch(
-            `https://api.flutterwave.com/v3/transactions?tx_ref=${encodeURIComponent(tx_ref)}`,
-            {
-              method: "GET",
-              headers: {
-                Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
-                "Content-Type": "application/json",
-              },
+          try {
+            const flwRes = await fetch(
+              `https://api.flutterwave.com/v3/transactions?tx_ref=${encodeURIComponent(tx_ref)}`,
+              {
+                method: "GET",
+                headers: {
+                  Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+            if (flwRes.ok) {
+              const flwData = await flwRes.json();
+              if (flwData.status === "success" && Array.isArray(flwData.data) && flwData.data.length > 0) {
+                const successfulTx = flwData.data.find(tx => tx.status === "successful");
+                if (successfulTx) {
+                  isSuccessful = true;
+                  confirmedAmount = Number(successfulTx.amount || amount_paid);
+                }
+              }
             }
-          );
-          const flwData = await flwRes.json();
-
-          if (flwData.status === "success" && Array.isArray(flwData.data) && flwData.data.length > 0) {
-            const successfulTx = flwData.data.find(tx => tx.status === "successful");
-            if (successfulTx) {
-              isSuccessful = true;
-              confirmedAmount = Number(successfulTx.amount || amount_paid);
-            }
+          } catch (fErr) {
+            console.warn(`   ⚠️ list transactions check returned:`, fErr.message);
           }
         }
 

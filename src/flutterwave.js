@@ -92,7 +92,7 @@ export async function createDynamicVirtualAccount(phone, amount, planName) {
 export async function verifyVirtualAccountPayment(txRef, amount) {
   try {
     const response = await flw.get(
-      `/transactions/verify-by-reference?tx_ref=${txRef}`,
+      `/transactions/verify_by_reference?tx_ref=${txRef}`,
     );
     const data = response.data.data;
 
