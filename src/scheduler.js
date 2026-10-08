@@ -4,6 +4,7 @@ import {
   removeHotspotUser,
   removeActiveSessions,
   getActiveSessions,
+  getHotspotUser,
   calculateExpiryDate,
 } from "./mikrotik.js";
 import config from "./config.js";
