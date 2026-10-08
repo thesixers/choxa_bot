@@ -2,8 +2,11 @@ import {
   provisionHotspotUser, 
   removeHotspotUser, 
   removeActiveSessions, 
-  buildMikrotikComment, 
+  buildMikrotikComment,
   getMikrotikClient,
+  getHotspotUser,
+  updateHotspotUser,
+  removeHotspotCookies,
   resolveDurationStr 
 } from "./mikrotik.js";
 import { generateUniquePin } from "./fulfillPayment.js";
@@ -67,6 +70,10 @@ export async function handleAdminMessage(platform, remoteId, from, text, db) {
       `   Recent payments log\n\n` +
       `⚡ *!kick* <pin>\n` +
       `   Kick active connection on MikroTik\n\n` +
+      `🔓 *!resetmac* <pin>\n` +
+      `   Clear locked MAC address (fix iOS/Android lockouts)\n\n` +
+      `🍪 *!clearcookies* <pin>\n` +
+      `   Purge all MAC cookies for a PIN\n\n` +
       `🗑️ *!delticket* <pin>\n` +
       `   Remove ticket from router & mark expired\n\n` +
       `📢 *!broadcast* <message>\n` +
@@ -284,6 +291,58 @@ export async function handleAdminMessage(platform, remoteId, from, text, db) {
 
     const count = await removeActiveSessions(pin);
     await sendMessage(from, `⚡ Kicked ${count} active session(s) for PIN \`${pin}\`.`);
+    return true;
+  }
+
+  // ── Reset Locked MAC Address ───────────────────────────────────────────
+  if (cmd === "!resetmac") {
+    const pin = parts[1];
+    if (!pin) {
+      await sendMessage(from, "Usage: *!resetmac <pin>*\n\nClears the locked MAC address so a customer can log in again from any device (use after iOS/Android MAC randomization lockout).");
+      return true;
+    }
+
+    try {
+      const mkUser = await getHotspotUser(pin);
+      if (!mkUser || !mkUser[".id"]) {
+        await sendMessage(from, `❌ PIN \`${pin}\` not found on MikroTik.`);
+        return true;
+      }
+
+      const hadMac = mkUser["mac-address"] && mkUser["mac-address"] !== "";
+      // Clear the mac-address field
+      await updateHotspotUser(mkUser[".id"], { "mac-address": "" });
+      // Also purge all MAC cookies so the customer gets a clean slate
+      const cookieCount = await removeHotspotCookies(pin);
+
+      await sendMessage(
+        from,
+        `✅ *MAC Reset Done*\n\n` +
+        `🎟️ PIN: \`${pin}\`\n` +
+        `${hadMac ? `🔓 Cleared locked MAC: \`${mkUser["mac-address"]}\`` : "ℹ️ No MAC was locked"}\n` +
+        `🍪 Purged ${cookieCount} cookie(s)\n\n` +
+        `Customer can now log in again from any device.`,
+      );
+    } catch (err) {
+      await sendMessage(from, `❌ Failed to reset MAC: ${err.message}`);
+    }
+    return true;
+  }
+
+  // ── Purge MAC Cookies ──────────────────────────────────────────────────
+  if (cmd === "!clearcookies") {
+    const pin = parts[1];
+    if (!pin) {
+      await sendMessage(from, "Usage: *!clearcookies <pin>*\n\nPurges all MAC cookies for a PIN (use if a customer is stuck on a login loop or the cookie expired mid-plan).");
+      return true;
+    }
+
+    try {
+      const count = await removeHotspotCookies(pin);
+      await sendMessage(from, `🍪 Cleared ${count} MAC cookie(s) for PIN \`${pin}\`. Customer will need to log in fresh.`);
+    } catch (err) {
+      await sendMessage(from, `❌ Failed to clear cookies: ${err.message}`);
+    }
     return true;
   }
 

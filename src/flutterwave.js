@@ -107,7 +107,10 @@ export async function verifyVirtualAccountPayment(txRef, amount) {
 
     return { paid: false, amountPaid: 0 };
   } catch (error) {
-    if (error.response?.status === 404) {
+    const status = error.response?.status;
+    const msg = (error.response?.data?.message || "").toLowerCase();
+    // Flutterwave returns 404, or 400 with "No transaction was found" when funds have not arrived yet
+    if (status === 404 || (status === 400 && msg.includes("no transaction was found"))) {
       return { paid: false, amountPaid: 0 };
     }
     console.error("Flutterwave verification error:", error.response?.data || error.message);

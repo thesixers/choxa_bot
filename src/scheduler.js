@@ -4,8 +4,6 @@ import {
   removeHotspotUser,
   removeActiveSessions,
   getActiveSessions,
-  getHotspotUser,
-  updateHotspotUser,
   calculateExpiryDate,
 } from "./mikrotik.js";
 import config from "./config.js";
@@ -132,21 +130,6 @@ async function activateNewLogins(db) {
 
         console.log(`🚀 Activated ticket PIN ${sub.pin} (${sub.plan_name}) — expires at ${expiryTime.toLocaleString()}`);
 
-        // Lock MAC address for 1-device plans if currently connected
-        if (Number(sub.shared_users) === 1) {
-          const session = activeSessions.find((s) => String(s.user) === pinStr);
-          if (session && session["mac-address"]) {
-            try {
-              const mkUser = await getHotspotUser(pinStr);
-              if (mkUser && mkUser[".id"] && (!mkUser["mac-address"] || mkUser["mac-address"] === "00:00:00:00:00:00")) {
-                await updateHotspotUser(mkUser[".id"], { "mac-address": session["mac-address"] });
-                console.log(`🔒 Locked ticket PIN ${sub.pin} to MAC ${session["mac-address"]}`);
-              }
-            } catch (macErr) {
-              console.warn(`⚠️ Could not bind MAC for PIN ${sub.pin}:`, macErr.message);
-            }
-          }
-        }
 
         if (sub.phone) {
           const formattedExpiry = expiryTime.toLocaleString("en-GB", {

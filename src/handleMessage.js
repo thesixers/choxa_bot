@@ -129,7 +129,9 @@ function buildWelcomeMessage(name = "there") {
     `2️⃣  📋 My Tickets (View My PINs)\n` +
     `3️⃣  💳 Payment History\n` +
     `4️⃣  📞 Contact Support\n\n` +
-    `Reply with a number (1–4).` +
+    `Reply with a number (1–4).\n\n` +
+    `Need help with your hotspot connection or payment?\n` +
+    `💬 WhatsApp / Phone: *${config.supportPhone}*\n\n` +
     (config.telegramBotHandle ? `\n\n✈️ Prefer Telegram? Chat at https://t.me/${config.telegramBotHandle}` : "")
   );
 }
