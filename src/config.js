@@ -18,7 +18,7 @@ export const config = {
     port: parseInt(process.env.MIKROTIK_PORT, 10) || 80,
     hotspotServer: process.env.MIKROTIK_HOTSPOT_SERVER || "all",
   },
-  allowPayment: process.env.ALLOW_PAYMENT || false,
+  allowPayment: false,
 };
 
 export default config;
