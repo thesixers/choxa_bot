@@ -18,7 +18,7 @@ export const config = {
     port: parseInt(process.env.MIKROTIK_PORT, 10) || 80,
     hotspotServer: process.env.MIKROTIK_HOTSPOT_SERVER || "all",
   },
-  allowPayment: false,
+  allowPayment: process.env.ENABLE_WHATSAPP === "true",
 };
 
 export default config;
