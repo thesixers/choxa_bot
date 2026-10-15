@@ -204,6 +204,10 @@ export async function handleMessage(platform, remoteId, pnJid, text, pushName = 
     case "start":
     case "awaiting_service_selection": {
       if (message === "1") {
+        if (!config.allowPayment) {
+          await sendMessage(phone, `Payment gateway is under maintainance come back later`);
+          return;
+        }
         // Buy Ticket
         const plans = await getAllPlans(db);
         await updateSession(db, phone, "awaiting_plan_selection", null, platform, remoteId);
@@ -266,6 +270,13 @@ export async function handleMessage(platform, remoteId, pnJid, text, pushName = 
     // PLAN SELECTION: awaiting_plan_selection
     // ──────────────────────────────────────────────────────────────────
     case "awaiting_plan_selection": {
+
+      if (!config.allowPayment) {
+        await sendMessage(phone, `Payment gateway is under maintainance come back later`);
+        return;
+      }
+
+      
       if (message === "0") {
         await updateSession(db, phone, "awaiting_service_selection", null, platform, remoteId);
         await sendMessage(phone, buildWelcomeMessage(firstName));
